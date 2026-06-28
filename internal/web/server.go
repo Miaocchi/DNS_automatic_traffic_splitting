@@ -29,10 +29,13 @@ var (
 	sessionMu sync.Mutex
 )
 
+const topStatsLimit = 20
+
 type DashboardStats struct {
 	UptimeSeconds        int64            `json:"uptime_seconds"`
 	MemoryUsageMB        float64          `json:"memory_usage_mb"`
 	NumGoroutines        int              `json:"num_goroutines"`
+	QPS                  float64          `json:"qps"`
 	TotalQueries         int64            `json:"total_queries"`
 	TotalCN              int64            `json:"total_cn"`
 	TotalOverseas        int64            `json:"total_overseas"`
@@ -86,6 +89,7 @@ func StartWebServer(mgr *manager.ServiceManager) {
 		}
 		sessionMu.Lock()
 		defer sessionMu.Unlock()
+		pruneExpiredSessionsLocked(time.Now())
 		expiry, ok := sessions[cookie.Value]
 		return ok && time.Now().Before(expiry)
 	}
@@ -126,6 +130,7 @@ func StartWebServer(mgr *manager.ServiceManager) {
 			expiry := time.Now().Add(24 * time.Hour)
 
 			sessionMu.Lock()
+			pruneExpiredSessionsLocked(time.Now())
 			sessions[token] = expiry
 			sessionMu.Unlock()
 
@@ -483,6 +488,7 @@ func StartWebServer(mgr *manager.ServiceManager) {
 			UptimeSeconds:        int64(time.Since(stats.StartTime).Seconds()),
 			MemoryUsageMB:        float64(m.Alloc) / 1024 / 1024,
 			NumGoroutines:        runtime.NumGoroutine(),
+			QPS:                  stats.QPS,
 			TotalQueries:         stats.TotalQueries,
 			TotalCN:              stats.TotalCN,
 			TotalOverseas:        stats.TotalOverseas,
@@ -491,15 +497,15 @@ func StartWebServer(mgr *manager.ServiceManager) {
 			AggregateWarmups:     stats.AggregateWarmups,
 			AggregateWarmSuccess: stats.AggregateWarmSuccess,
 			HotRefreshTriggers:   stats.HotRefreshTriggers,
-			ListenDNSUDP:         currentCfg.Listen.DNSUDP,
-			ListenDNSTCP:         currentCfg.Listen.DNSTCP,
-			ListenDOH:            currentCfg.Listen.DOH,
-			ListenDOT:            currentCfg.Listen.DOT,
-			ListenDOQ:            currentCfg.Listen.DOQ,
+			ListenDNSUDP:         currentCfg.Listen.DNSUDPAddr(),
+			ListenDNSTCP:         currentCfg.Listen.DNSTCPAddr(),
+			ListenDOH:            currentCfg.Listen.DOHAddr(),
+			ListenDOT:            currentCfg.Listen.DOTAddr(),
+			ListenDOQ:            currentCfg.Listen.DOQAddr(),
 			UpstreamCN:           len(currentCfg.Upstreams.CN),
 			UpstreamOverseas:     len(currentCfg.Upstreams.Overseas),
-			TopClients:           stats.TopClients,
-			TopDomains:           stats.TopDomains,
+			TopClients:           limitCountMap(stats.TopClients, topStatsLimit),
+			TopDomains:           limitCountMap(stats.TopDomains, topStatsLimit),
 		}
 
 		if mgr.Router != nil {
@@ -548,4 +554,45 @@ func StartWebServer(mgr *manager.ServiceManager) {
 			log.Printf("WebUI HTTP server failed: %v", err)
 		}
 	}()
+}
+
+func pruneExpiredSessionsLocked(now time.Time) {
+	for token, expiry := range sessions {
+		if now.After(expiry) {
+			delete(sessions, token)
+		}
+	}
+}
+
+func limitCountMap(source map[string]int64, limit int) map[string]int64 {
+	if len(source) == 0 || limit <= 0 || len(source) <= limit {
+		result := make(map[string]int64, len(source))
+		for key, value := range source {
+			result[key] = value
+		}
+		return result
+	}
+
+	type kv struct {
+		key   string
+		value int64
+	}
+
+	items := make([]kv, 0, len(source))
+	for key, value := range source {
+		items = append(items, kv{key: key, value: value})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].value == items[j].value {
+			return items[i].key < items[j].key
+		}
+		return items[i].value > items[j].value
+	})
+
+	result := make(map[string]int64, limit)
+	for _, item := range items[:limit] {
+		result[item.key] = item.value
+	}
+	return result
 }

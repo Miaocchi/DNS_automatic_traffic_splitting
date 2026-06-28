@@ -175,13 +175,14 @@ sudo systemctl start doh-autoproxy
 
 ```yaml
 listen:
-  dns_udp: "53"
-  dns_tcp: "53"
-  doh: "443"
-  doh_path: "/dns-query"
-  dot: "853"
+  address: ""             # 监听地址，留空默认 0.0.0.0
+  dns_udp: "53"           # 标准 DNS (UDP)
+  dns_tcp: "53"           # 标准 DNS (TCP)
+  doh: "443"              # DNS over HTTPS
+  doh_path: "/dns-query"  # DoH 路径，默认 /dns-query
+  dot: "853"              # DNS over TLS
   dot_sni: "dns.example.com"
-  doq: "853"
+  doq: "853"              # DNS over QUIC
   doq_sni: "dns.example.com"
 
 bootstrap_dns:

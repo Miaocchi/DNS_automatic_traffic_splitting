@@ -44,7 +44,6 @@ type ServiceManager struct {
 func NewServiceManager(initialCfg *config.Config) *ServiceManager {
 	return &ServiceManager{
 		Config:         initialCfg,
-		QueryLog:       querylog.NewQueryLogger(initialCfg.QueryLog.MaxSizeMB, initialCfg.QueryLog.File, initialCfg.QueryLog.SaveToFile),
 		stopAutoUpdate: make(chan struct{}),
 	}
 }
@@ -88,6 +87,10 @@ func (m *ServiceManager) Reload(newCfg *config.Config) error {
 		log.Println("GeoData 配置未更改，保留现有的 Geo 数据库以加快重新加载。")
 	}
 
+	if err := m.stopInternal(); err != nil {
+		log.Printf("Warning: Error stopping services during reload: %v", err)
+	}
+
 	if m.Config.QueryLog.SaveToFile && !newCfg.QueryLog.SaveToFile {
 		logFile := m.Config.QueryLog.File
 		if logFile == "" {
@@ -97,10 +100,6 @@ func (m *ServiceManager) Reload(newCfg *config.Config) error {
 		if err := os.Remove(logFile); err != nil && !os.IsNotExist(err) {
 			log.Printf("删除日志文件失败: %v", err)
 		}
-	}
-
-	if err := m.stopInternal(); err != nil {
-		log.Printf("Warning: Error stopping services during reload: %v", err)
 	}
 
 	m.Config = newCfg
@@ -249,7 +248,12 @@ func (m *ServiceManager) startInternal() error {
 	if cfg.QueryLog.SaveToFile && logFile == "" {
 		logFile = "query.log"
 	}
-	m.QueryLog = querylog.NewQueryLogger(cfg.QueryLog.MaxSizeMB, logFile, cfg.QueryLog.SaveToFile)
+	if m.QueryLog != nil {
+		if err := m.QueryLog.Close(); err != nil {
+			log.Printf("关闭旧查询日志器失败: %v", err)
+		}
+	}
+	m.QueryLog = querylog.NewQueryLogger(cfg.QueryLog.Enabled, cfg.QueryLog.MaxHistory, cfg.QueryLog.MaxSizeMB, logFile, cfg.QueryLog.SaveToFile)
 
 	m.Router = router.NewRouter(cfg, m.GeoManager, m.QueryLog)
 
@@ -361,29 +365,40 @@ func (m *ServiceManager) startInternal() error {
 func (m *ServiceManager) stopInternal() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	var firstErr error
 
 	if m.ACMEServer != nil {
-		m.ACMEServer.Shutdown(ctx)
+		if err := m.ACMEServer.Shutdown(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		m.ACMEServer = nil
 	}
 
 	if m.DNSServer != nil {
-		m.DNSServer.Stop()
+		if err := m.DNSServer.Stop(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		m.DNSServer = nil
 	}
 
 	if m.DoTServer != nil {
-		m.DoTServer.Stop()
+		if err := m.DoTServer.Stop(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		m.DoTServer = nil
 	}
 
 	if m.DoQServer != nil {
-		m.DoQServer.Stop()
+		if err := m.DoQServer.Stop(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		m.DoQServer = nil
 	}
 
 	if m.DoHServer != nil {
-		m.DoHServer.Stop()
+		if err := m.DoHServer.Stop(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		m.DoHServer = nil
 	}
 
@@ -407,7 +422,21 @@ func (m *ServiceManager) stopInternal() error {
 		m.ParallelReturnServer = nil
 	}
 
-	return nil
+	if m.Router != nil {
+		if err := m.Router.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		m.Router = nil
+	}
+
+	if m.QueryLog != nil {
+		if err := m.QueryLog.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		m.QueryLog = nil
+	}
+
+	return firstErr
 }
 
 func (m *ServiceManager) GetCertManager() *util.CertManager {

@@ -33,7 +33,7 @@ func NewDoQServer(cfg *config.Config, r *router.Router, cm *util.CertManager) *D
 
 func NewDoQServerWithMode(cfg *config.Config, r *router.Router, cm *util.CertManager, mode string) *DoQServer {
 	return &DoQServer{
-		addr:   cfg.Listen.DOQ,
+		addr:   cfg.Listen.DOQAddr(),
 		router: r,
 		cfg:    cfg,
 		cm:     cm,

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,7 @@ type TLSCertConfig struct {
 
 type QueryLogConfig struct {
 	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	MaxHistory int    `yaml:"max_history" json:"max_history"`
 	File       string `yaml:"file" json:"file"`
 	MaxSizeMB  int    `yaml:"max_size_mb" json:"max_size_mb"`
 	SaveToFile bool   `yaml:"save_to_file" json:"save_to_file"`
@@ -56,6 +58,7 @@ type AutoCertConfig struct {
 }
 
 type ListenConfig struct {
+	Address string `yaml:"address" json:"address"`
 	DNSUDP  string `yaml:"dns_udp" json:"dns_udp"`
 	DNSTCP  string `yaml:"dns_tcp" json:"dns_tcp"`
 	DOH     string `yaml:"doh" json:"doh"`
@@ -75,6 +78,26 @@ type ParallelReturnConfig struct {
 	SingleRecordPerType   bool            `yaml:"single_record_per_type" json:"single_record_per_type"`
 	Listen                ListenConfig    `yaml:"listen" json:"listen"`
 	Upstreams             UpstreamsConfig `yaml:"upstreams" json:"upstreams"`
+}
+
+func (l ListenConfig) DNSUDPAddr() string {
+	return resolveListenAddr(l.Address, l.DNSUDP)
+}
+
+func (l ListenConfig) DNSTCPAddr() string {
+	return resolveListenAddr(l.Address, l.DNSTCP)
+}
+
+func (l ListenConfig) DOHAddr() string {
+	return resolveListenAddr(l.Address, l.DOH)
+}
+
+func (l ListenConfig) DOTAddr() string {
+	return resolveListenAddr(l.Address, l.DOT)
+}
+
+func (l ListenConfig) DOQAddr() string {
+	return resolveListenAddr(l.Address, l.DOQ)
 }
 
 type UpstreamsConfig struct {
@@ -118,42 +141,19 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	cfg.ConfigDir = configDir
-	cfg.QueryLog.Enabled = true
 
-	normalizePort := func(p *string) {
-		if *p != "" && !strings.Contains(*p, ":") {
-			*p = ":" + *p
-		}
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("failed to inspect config defaults in %s: %w", absPath, err)
 	}
-	normalizePort(&cfg.Listen.DNSUDP)
-	normalizePort(&cfg.Listen.DNSTCP)
-	normalizePort(&cfg.Listen.DOH)
-	normalizePort(&cfg.Listen.DOT)
-	normalizePort(&cfg.Listen.DOQ)
-	cfg.Listen.DoHPath = normalizeDoHPath(cfg.Listen.DoHPath)
-	cfg.Listen.DoTSNI = normalizeServerName(cfg.Listen.DoTSNI)
-	cfg.Listen.DoQSNI = normalizeServerName(cfg.Listen.DoQSNI)
-	normalizePort(&cfg.ParallelReturn.Listen.DNSUDP)
-	normalizePort(&cfg.ParallelReturn.Listen.DNSTCP)
-	normalizePort(&cfg.ParallelReturn.Listen.DOH)
-	normalizePort(&cfg.ParallelReturn.Listen.DOT)
-	normalizePort(&cfg.ParallelReturn.Listen.DOQ)
-	cfg.ParallelReturn.Listen.DoHPath = normalizeDoHPath(cfg.ParallelReturn.Listen.DoHPath)
-	cfg.ParallelReturn.Listen.DoTSNI = normalizeServerName(cfg.ParallelReturn.Listen.DoTSNI)
-	cfg.ParallelReturn.Listen.DoQSNI = normalizeServerName(cfg.ParallelReturn.Listen.DoQSNI)
-	if cfg.ParallelReturn.WarmCacheTTL <= 0 {
-		cfg.ParallelReturn.WarmCacheTTL = 5
+	if !hasNestedKey(raw, "query_log", "enabled") {
+		cfg.QueryLog.Enabled = true
 	}
-	if cfg.ParallelReturn.AggregateCacheTTL <= 0 {
-		cfg.ParallelReturn.AggregateCacheTTL = 30
-	}
-	if cfg.ParallelReturn.AggregateCacheTTLMode == "" {
-		cfg.ParallelReturn.AggregateCacheTTLMode = "fixed"
-	}
-	if cfg.ParallelReturn.AggregateTTLStrategy == "" {
-		cfg.ParallelReturn.AggregateTTLStrategy = "median"
+	if cfg.QueryLog.MaxHistory <= 0 {
+		cfg.QueryLog.MaxHistory = 5000
 	}
 
+	normalizeConfigDefaults(&cfg)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -198,6 +198,25 @@ func LoadConfig(configPath string) (*Config, error) {
 	return &cfg, nil
 }
 
+func hasNestedKey(root map[string]interface{}, keys ...string) bool {
+	current := root
+	for i, key := range keys {
+		value, ok := current[key]
+		if !ok {
+			return false
+		}
+		if i == len(keys)-1 {
+			return true
+		}
+		next, ok := value.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		current = next
+	}
+	return false
+}
+
 func (c *Config) Save(configPath string) error {
 	absPath, err := filepath.Abs(configPath)
 	if err != nil {
@@ -206,40 +225,7 @@ func (c *Config) Save(configPath string) error {
 	configDir := filepath.Dir(absPath)
 	c.ConfigDir = configDir
 
-	normalizePort := func(p *string) {
-		if *p != "" && !strings.Contains(*p, ":") {
-			*p = ":" + *p
-		}
-	}
-	normalizePort(&c.Listen.DNSUDP)
-	normalizePort(&c.Listen.DNSTCP)
-	normalizePort(&c.Listen.DOH)
-	normalizePort(&c.Listen.DOT)
-	normalizePort(&c.Listen.DOQ)
-	c.Listen.DoHPath = normalizeDoHPath(c.Listen.DoHPath)
-	c.Listen.DoTSNI = normalizeServerName(c.Listen.DoTSNI)
-	c.Listen.DoQSNI = normalizeServerName(c.Listen.DoQSNI)
-	normalizePort(&c.ParallelReturn.Listen.DNSUDP)
-	normalizePort(&c.ParallelReturn.Listen.DNSTCP)
-	normalizePort(&c.ParallelReturn.Listen.DOH)
-	normalizePort(&c.ParallelReturn.Listen.DOT)
-	normalizePort(&c.ParallelReturn.Listen.DOQ)
-	c.ParallelReturn.Listen.DoHPath = normalizeDoHPath(c.ParallelReturn.Listen.DoHPath)
-	c.ParallelReturn.Listen.DoTSNI = normalizeServerName(c.ParallelReturn.Listen.DoTSNI)
-	c.ParallelReturn.Listen.DoQSNI = normalizeServerName(c.ParallelReturn.Listen.DoQSNI)
-	if c.ParallelReturn.WarmCacheTTL <= 0 {
-		c.ParallelReturn.WarmCacheTTL = 5
-	}
-	if c.ParallelReturn.AggregateCacheTTL <= 0 {
-		c.ParallelReturn.AggregateCacheTTL = 30
-	}
-	if c.ParallelReturn.AggregateCacheTTLMode == "" {
-		c.ParallelReturn.AggregateCacheTTLMode = "fixed"
-	}
-	if c.ParallelReturn.AggregateTTLStrategy == "" {
-		c.ParallelReturn.AggregateTTLStrategy = "median"
-	}
-
+	normalizeConfigDefaults(c)
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -378,6 +364,58 @@ func GetDefaultConfigPath() string {
 	return "config.yaml"
 }
 
+func normalizeConfigDefaults(c *Config) {
+	normalizeListenConfig(&c.Listen)
+	normalizeListenConfig(&c.ParallelReturn.Listen)
+
+	if c.ParallelReturn.WarmCacheTTL <= 0 {
+		c.ParallelReturn.WarmCacheTTL = 5
+	}
+	if c.ParallelReturn.AggregateCacheTTL <= 0 {
+		c.ParallelReturn.AggregateCacheTTL = 30
+	}
+	if c.ParallelReturn.AggregateCacheTTLMode == "" {
+		c.ParallelReturn.AggregateCacheTTLMode = "fixed"
+	}
+	if c.ParallelReturn.AggregateTTLStrategy == "" {
+		c.ParallelReturn.AggregateTTLStrategy = "median"
+	}
+}
+
+func normalizeListenConfig(listen *ListenConfig) {
+	if listen == nil {
+		return
+	}
+
+	listen.Address = strings.TrimSpace(listen.Address)
+	inferredAddress := ""
+
+	normalizePort := func(p *string) {
+		host, port := splitListenValue(*p)
+		if port != "" {
+			*p = port
+		} else {
+			*p = strings.TrimSpace(*p)
+		}
+		if listen.Address == "" && inferredAddress == "" && host != "" {
+			inferredAddress = host
+		}
+	}
+
+	normalizePort(&listen.DNSUDP)
+	normalizePort(&listen.DNSTCP)
+	normalizePort(&listen.DOH)
+	normalizePort(&listen.DOT)
+	normalizePort(&listen.DOQ)
+
+	if listen.Address == "" {
+		listen.Address = inferredAddress
+	}
+	listen.DoHPath = normalizeDoHPath(listen.DoHPath)
+	listen.DoTSNI = normalizeServerName(listen.DoTSNI)
+	listen.DoQSNI = normalizeServerName(listen.DoQSNI)
+}
+
 func normalizeDoHPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -433,4 +471,43 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+func splitListenValue(value string) (string, string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", ""
+	}
+	if strings.HasPrefix(value, ":") {
+		return "", strings.TrimSpace(strings.TrimPrefix(value, ":"))
+	}
+	if !strings.Contains(value, ":") {
+		return "", value
+	}
+
+	host, port, err := net.SplitHostPort(value)
+	if err == nil {
+		return strings.TrimSpace(host), strings.TrimSpace(port)
+	}
+
+	if strings.Count(value, ":") == 1 {
+		parts := strings.SplitN(value, ":", 2)
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+
+	return "", value
+}
+
+func resolveListenAddr(address, value string) string {
+	_, port := splitListenValue(value)
+	if port == "" {
+		return ""
+	}
+
+	host := strings.TrimSpace(address)
+	if host == "" {
+		host = "0.0.0.0"
+	}
+
+	return net.JoinHostPort(host, port)
 }

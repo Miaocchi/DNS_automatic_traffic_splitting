@@ -126,6 +126,26 @@ func (r *Router) GetUpstreamStats() []interface{} {
 	return stats
 }
 
+func (r *Router) Close() error {
+	if r == nil {
+		return nil
+	}
+
+	var firstErr error
+	for _, s := range r.cnStats {
+		if err := s.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, s := range r.overseasStats {
+		if err := s.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	return firstErr
+}
+
 func (r *Router) Route(ctx context.Context, req *dns.Msg, clientIP string) (*dns.Msg, error) {
 	start := time.Now()
 	if len(req.Question) == 0 {
@@ -135,6 +155,9 @@ func (r *Router) Route(ctx context.Context, req *dns.Msg, clientIP string) (*dns
 	downstreamECS := client.ExtractECS(req)
 	resp, upstream, err := r.routeInternal(ctx, req)
 	meta := RequestMetaFromContext(ctx)
+	if err == nil && resp != nil {
+		resp, upstream = r.normalizeServiceBindingNegativeResponse(ctx, req, resp, upstream)
+	}
 
 	duration := time.Since(start).Milliseconds()
 
@@ -209,8 +232,162 @@ func (r *Router) Route(ctx context.Context, req *dns.Msg, clientIP string) (*dns
 	return resp, err
 }
 
+func isServiceBindingQuestion(req *dns.Msg) bool {
+	if len(req.Question) == 0 {
+		return false
+	}
+
+	qType := req.Question[0].Qtype
+	return qType == dns.TypeHTTPS || qType == dns.TypeSVCB
+}
+
+func newExistenceCheckRequest(req *dns.Msg, qName string) *dns.Msg {
+	checkReq := new(dns.Msg)
+	checkReq.SetQuestion(dns.Fqdn(qName), dns.TypeA)
+	checkReq.Id = req.Id
+	checkReq.RecursionDesired = req.RecursionDesired
+	checkReq.CheckingDisabled = req.CheckingDisabled
+
+	if opt := req.IsEdns0(); opt != nil {
+		checkReq.SetEdns0(opt.UDPSize(), opt.Do())
+	}
+
+	return checkReq
+}
+
+func synthesizeNoDataResponse(req *dns.Msg, resp *dns.Msg) *dns.Msg {
+	normalized := resp.Copy()
+	normalized.Rcode = dns.RcodeSuccess
+	normalized.Answer = nil
+	normalized.Ns = nil
+	normalized.Extra = nil
+	for _, extra := range resp.Extra {
+		if extra.Header().Rrtype == dns.TypeOPT {
+			normalized.Extra = append(normalized.Extra, dns.Copy(extra))
+		}
+	}
+	normalized.Question = append([]dns.Question(nil), req.Question...)
+	return normalized
+}
+
+func (r *Router) normalizeServiceBindingNegativeResponse(ctx context.Context, req, resp *dns.Msg, upstream string) (*dns.Msg, string) {
+	if resp == nil || resp.Rcode != dns.RcodeNameError || !isServiceBindingQuestion(req) {
+		return resp, upstream
+	}
+
+	candidates := matchNames(req.Question[0].Name)
+	if len(candidates) <= 1 {
+		return resp, upstream
+	}
+
+	originName := candidates[len(candidates)-1]
+	checkReq := newExistenceCheckRequest(req, originName)
+	checkResp, _, err := r.routeInternal(ctx, checkReq)
+	if err != nil || checkResp == nil || checkResp.Rcode != dns.RcodeSuccess {
+		return resp, upstream
+	}
+
+	return synthesizeNoDataResponse(req, resp), upstream + "/Compat-NODATA"
+}
+
+// matchNames returns the original qname plus progressively stripped variants
+// without leading underscore labels. This lets service-style names such as
+// _8443._https.example.com inherit routing policy from example.com while still
+// sending the original qname to upstream resolvers.
+func matchNames(qName string) []string {
+	qName = strings.ToLower(strings.TrimSuffix(qName, "."))
+	if qName == "" {
+		return nil
+	}
+
+	names := []string{qName}
+	seen := map[string]struct{}{qName: {}}
+	labels := dns.SplitDomainName(qName)
+
+	for i := 0; i < len(labels)-1; i++ {
+		if !strings.HasPrefix(labels[i], "_") {
+			break
+		}
+
+		candidate := strings.Join(labels[i+1:], ".")
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+
+		names = append(names, candidate)
+		seen[candidate] = struct{}{}
+	}
+
+	return names
+}
+
+func (r *Router) lookupRule(names []string) (string, bool) {
+	for _, name := range names {
+		if rule, ok := r.config.Rules[name]; ok {
+			return rule, true
+		}
+	}
+	return "", false
+}
+
+func (r *Router) lookupRegexRule(names []string) (string, bool) {
+	for _, name := range names {
+		for _, rr := range r.regexRules {
+			if rr.Pattern.MatchString(name) {
+				return rr.Target, true
+			}
+		}
+	}
+	return "", false
+}
+
+func (r *Router) lookupGeoSite(names []string) string {
+	for _, name := range names {
+		if geoSiteRule := r.geo.LookupGeoSite(name); geoSiteRule != "" {
+			return geoSiteRule
+		}
+	}
+	return ""
+}
+
+func hostOverrideResponse(req *dns.Msg, ip net.IP) (*dns.Msg, bool) {
+	if ip == nil || len(req.Question) == 0 {
+		return nil, false
+	}
+
+	qType := req.Question[0].Qtype
+	isIPv4 := ip.To4() != nil
+	if qType != dns.TypeANY &&
+		((qType == dns.TypeA && !isIPv4) ||
+			(qType == dns.TypeAAAA && isIPv4) ||
+			(qType != dns.TypeA && qType != dns.TypeAAAA)) {
+		return nil, false
+	}
+
+	m := new(dns.Msg)
+	m.SetReply(req)
+	rrHeader := dns.RR_Header{
+		Name:  req.Question[0].Name,
+		Class: dns.ClassINET,
+		Ttl:   60,
+	}
+	if isIPv4 {
+		rrHeader.Rrtype = dns.TypeA
+		m.Answer = append(m.Answer, &dns.A{Hdr: rrHeader, A: ip.To4()})
+	} else {
+		rrHeader.Rrtype = dns.TypeAAAA
+		m.Answer = append(m.Answer, &dns.AAAA{Hdr: rrHeader, AAAA: ip})
+	}
+
+	return m, true
+}
+
 func (r *Router) routeInternal(ctx context.Context, req *dns.Msg) (*dns.Msg, string, error) {
 	qName := strings.ToLower(strings.TrimSuffix(req.Question[0].Name, "."))
+	matchCandidates := matchNames(qName)
 
 	if ipStr, ok := r.config.Hosts[qName]; ok {
 		ip := net.ParseIP(ipStr)
@@ -218,24 +395,12 @@ func (r *Router) routeInternal(ctx context.Context, req *dns.Msg) (*dns.Msg, str
 			return nil, "Hosts", fmt.Errorf("自定义Hosts中存在无效IP地址: %s for %s", ipStr, qName)
 		}
 
-		m := new(dns.Msg)
-		m.SetReply(req)
-		rrHeader := dns.RR_Header{
-			Name:   req.Question[0].Name,
-			Rrtype: dns.TypeA,
-			Class:  dns.ClassINET,
-			Ttl:    60,
+		if resp, ok := hostOverrideResponse(req, ip); ok {
+			return resp, "Hosts", nil
 		}
-		if ipv4 := ip.To4(); ipv4 != nil {
-			m.Answer = append(m.Answer, &dns.A{Hdr: rrHeader, A: ipv4})
-		} else {
-			rrHeader.Rrtype = dns.TypeAAAA
-			m.Answer = append(m.Answer, &dns.AAAA{Hdr: rrHeader, AAAA: ip})
-		}
-		return m, "Hosts", nil
 	}
 
-	if rule, ok := r.config.Rules[qName]; ok {
+	if rule, ok := r.lookupRule(matchCandidates); ok {
 		switch strings.ToLower(rule) {
 		case "cn":
 			resp, err := r.resolveByMode(ctx, req, r.cnClients, "cn")
@@ -247,20 +412,18 @@ func (r *Router) routeInternal(ctx context.Context, req *dns.Msg) (*dns.Msg, str
 		}
 	}
 
-	for _, rr := range r.regexRules {
-		if rr.Pattern.MatchString(qName) {
-			switch strings.ToLower(rr.Target) {
-			case "cn":
-				resp, err := r.resolveByMode(ctx, req, r.cnClients, "cn")
-				return resp, "Rule(Regex/CN)", err
-			case "overseas":
-				resp, err := r.resolveByMode(ctx, req, r.overseasClients, "overseas")
-				return resp, "Rule(Regex/Overseas)", err
-			}
+	if regexRule, ok := r.lookupRegexRule(matchCandidates); ok {
+		switch strings.ToLower(regexRule) {
+		case "cn":
+			resp, err := r.resolveByMode(ctx, req, r.cnClients, "cn")
+			return resp, "Rule(Regex/CN)", err
+		case "overseas":
+			resp, err := r.resolveByMode(ctx, req, r.overseasClients, "overseas")
+			return resp, "Rule(Regex/Overseas)", err
 		}
 	}
 
-	if geoSiteRule := r.geo.LookupGeoSite(qName); geoSiteRule != "" {
+	if geoSiteRule := r.lookupGeoSite(matchCandidates); geoSiteRule != "" {
 		switch strings.ToLower(geoSiteRule) {
 		case "cn":
 			resp, err := r.resolveByMode(ctx, req, r.cnClients, "cn")

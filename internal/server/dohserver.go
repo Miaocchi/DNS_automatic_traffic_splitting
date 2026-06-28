@@ -78,7 +78,7 @@ func NewDoHServerWithMode(cfg *config.Config, r *router.Router, cm *util.CertMan
 	}
 
 	http2Server := &http.Server{
-		Addr:         cfg.Listen.DOH,
+		Addr:         cfg.Listen.DOHAddr(),
 		Handler:      dohHandler,
 		TLSConfig:    tlsConfig,
 		ReadTimeout:  10 * time.Second,
@@ -87,7 +87,7 @@ func NewDoHServerWithMode(cfg *config.Config, r *router.Router, cm *util.CertMan
 	}
 
 	http3Server := &http3.Server{
-		Addr:      cfg.Listen.DOH,
+		Addr:      cfg.Listen.DOHAddr(),
 		TLSConfig: tlsConfig,
 		Handler:   dohHandler,
 		QUICConfig: &quic.Config{
@@ -120,8 +120,10 @@ func (s *DoHServer) Start() {
 	go func() {
 		log.Printf("Starting DoH (HTTP/3) server on %s%s", s.http3Server.Addr, s.cfg.Listen.DoHPath)
 
-		udpPort := util.ParsePort(s.http3Server.Addr)
-		udpAddr := &net.UDPAddr{Port: udpPort}
+		udpAddr, err := net.ResolveUDPAddr("udp", s.http3Server.Addr)
+		if err != nil {
+			log.Fatalf("无法解析HTTP/3监听地址: %v", err)
+		}
 		udpConn, err := net.ListenUDP("udp", udpAddr)
 		if err != nil {
 			log.Fatalf("无法监听UDP端口用于HTTP/3: %v", err)

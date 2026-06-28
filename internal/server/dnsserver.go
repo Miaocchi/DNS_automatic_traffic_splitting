@@ -30,12 +30,12 @@ func NewDNSServerWithMode(cfg *config.Config, r *router.Router, mode string) *DN
 
 	var udpServer, tcpServer *dns.Server
 
-	if cfg.Listen.DNSUDP != "" {
-		udpServer = &dns.Server{Addr: cfg.Listen.DNSUDP, Net: "udp", Handler: handlerUDP, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
+	if addr := cfg.Listen.DNSUDPAddr(); addr != "" {
+		udpServer = &dns.Server{Addr: addr, Net: "udp", Handler: handlerUDP, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
 	}
 
-	if cfg.Listen.DNSTCP != "" {
-		tcpServer = &dns.Server{Addr: cfg.Listen.DNSTCP, Net: "tcp", Handler: handlerTCP, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
+	if addr := cfg.Listen.DNSTCPAddr(); addr != "" {
+		tcpServer = &dns.Server{Addr: addr, Net: "tcp", Handler: handlerTCP, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
 	}
 
 	return &DNSServer{
@@ -114,6 +114,5 @@ func (h *DNSRequestHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	resp.SetRcode(req, resp.Rcode)
 	w.WriteMsg(resp)
 }

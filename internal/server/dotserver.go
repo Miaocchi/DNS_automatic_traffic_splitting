@@ -58,7 +58,7 @@ func NewDoTServerWithMode(cfg *config.Config, r *router.Router, cm *util.CertMan
 	}
 
 	server := &dns.Server{
-		Addr:         cfg.Listen.DOT,
+		Addr:         cfg.Listen.DOTAddr(),
 		Net:          "tcp-tls",
 		TLSConfig:    tlsConfig,
 		Handler:      handler,
