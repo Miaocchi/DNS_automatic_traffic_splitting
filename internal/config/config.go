@@ -195,6 +195,10 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	cfg.GeoData.GeoSiteDat = resolvePath(cfg.GeoData.GeoSiteDat)
 
+	if cfg.AutoCert.CertDir != "" {
+		cfg.AutoCert.CertDir = resolvePath(cfg.AutoCert.CertDir)
+	}
+
 	return &cfg, nil
 }
 
@@ -242,6 +246,7 @@ func (c *Config) Save(configPath string) error {
 	saveCfg := *c
 	saveCfg.GeoData.GeoIPDat = relPath(c.GeoData.GeoIPDat)
 	saveCfg.GeoData.GeoSiteDat = relPath(c.GeoData.GeoSiteDat)
+	saveCfg.AutoCert.CertDir = relPath(c.AutoCert.CertDir)
 
 	data, err := yaml.Marshal(saveCfg)
 	if err != nil {

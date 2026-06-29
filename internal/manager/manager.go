@@ -313,7 +313,7 @@ func (m *ServiceManager) startInternal() error {
 		if err != nil {
 			return fmt.Errorf("shared DoH TLS init failed: %w", err)
 		}
-		m.SharedDoHServer = server.NewSharedDoHServer(cfg.Listen.DOH, entries, tlsConfig)
+		m.SharedDoHServer = server.NewSharedDoHServer(cfg.Listen.DOHAddr(), entries, tlsConfig)
 		m.SharedDoHServer.Start()
 	}
 
@@ -322,7 +322,7 @@ func (m *ServiceManager) startInternal() error {
 		if err != nil {
 			return fmt.Errorf("shared DoT TLS init failed: %w", err)
 		}
-		m.SharedDoTServer = server.NewSharedDoTServer(cfg.Listen.DOT, cfg.Listen.DoTSNI, m.Router, cfg.ParallelReturn.Listen.DoTSNI, parallelRouter, tlsConfig)
+		m.SharedDoTServer = server.NewSharedDoTServer(cfg.Listen.DOTAddr(), cfg.Listen.DoTSNI, m.Router, cfg.ParallelReturn.Listen.DoTSNI, parallelRouter, tlsConfig)
 		m.SharedDoTServer.Start()
 	} else if cfg.Listen.DOT != "" {
 		m.DoTServer = server.NewDoTServer(cfg, m.Router, m.CertManager)
@@ -336,7 +336,7 @@ func (m *ServiceManager) startInternal() error {
 		if err != nil {
 			return fmt.Errorf("shared DoQ TLS init failed: %w", err)
 		}
-		m.SharedDoQServer = server.NewSharedDoQServer(cfg.Listen.DOQ, cfg.Listen.DoQSNI, m.Router, cfg.ParallelReturn.Listen.DoQSNI, parallelRouter, tlsConfig)
+		m.SharedDoQServer = server.NewSharedDoQServer(cfg.Listen.DOQAddr(), cfg.Listen.DoQSNI, m.Router, cfg.ParallelReturn.Listen.DoQSNI, parallelRouter, tlsConfig)
 		m.SharedDoQServer.Start()
 	} else if cfg.Listen.DOQ != "" {
 		m.DoQServer = server.NewDoQServer(cfg, m.Router, m.CertManager)

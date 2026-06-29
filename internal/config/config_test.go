@@ -210,3 +210,31 @@ func TestLoadConfigDefaultsQueryLogWhenFieldMissing(t *testing.T) {
 		t.Fatalf("expected query_log.max_history default to 5000, got %d", cfg.QueryLog.MaxHistory)
 	}
 }
+
+func TestLoadConfigResolvesAutoCertDirRelativeToConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	content := []byte(`auto_cert:
+  enabled: true
+  email: "admin@example.com"
+  domains:
+    - "dns.example.com"
+  cert_dir: "certs"
+`)
+
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	want := filepath.Join(dir, "certs")
+	if cfg.AutoCert.CertDir != want {
+		t.Fatalf("AutoCert.CertDir = %q, want %q", cfg.AutoCert.CertDir, want)
+	}
+}

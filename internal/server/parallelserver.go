@@ -21,15 +21,15 @@ type ParallelReturnServer struct {
 }
 
 func NewParallelReturnServer(listen config.ListenConfig, tlsCerts []config.TLSCertConfig, autoCert config.AutoCertConfig, r *router.Router, cm *util.CertManager) *ParallelReturnServer {
-	handlerUDP := &DNSRequestHandler{router: r, protocol: "udp", listenAddr: listen.DNSUDP, mode: "parallel"}
-	handlerTCP := &DNSRequestHandler{router: r, protocol: "tcp", listenAddr: listen.DNSTCP, mode: "parallel"}
+	handlerUDP := &DNSRequestHandler{router: r, protocol: "udp", listenAddr: listen.DNSUDPAddr(), mode: "parallel"}
+	handlerTCP := &DNSRequestHandler{router: r, protocol: "tcp", listenAddr: listen.DNSTCPAddr(), mode: "parallel"}
 
 	var udpServer, tcpServer *dns.Server
-	if listen.DNSUDP != "" {
-		udpServer = &dns.Server{Addr: listen.DNSUDP, Net: "udp", Handler: handlerUDP, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
+	if addr := listen.DNSUDPAddr(); addr != "" {
+		udpServer = &dns.Server{Addr: addr, Net: "udp", Handler: handlerUDP, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
 	}
-	if listen.DNSTCP != "" {
-		tcpServer = &dns.Server{Addr: listen.DNSTCP, Net: "tcp", Handler: handlerTCP, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
+	if addr := listen.DNSTCPAddr(); addr != "" {
+		tcpServer = &dns.Server{Addr: addr, Net: "tcp", Handler: handlerTCP, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
 	}
 
 	parallelCfg := &config.Config{

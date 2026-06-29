@@ -149,10 +149,10 @@ func (s *SharedDoHServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 func BuildSharedDoHEntries(mainCfg *config.Config, mainRouter *router.Router, parallelRouter *router.Router) ([]sharedDoHEntry, error) {
 	entries := []sharedDoHEntry{}
 	if mainCfg.Listen.DOH != "" {
-		entries = append(entries, sharedDoHEntry{path: effectiveListenPath(mainCfg.Listen.DoHPath), router: mainRouter, mode: "standard", addr: mainCfg.Listen.DOH})
+		entries = append(entries, sharedDoHEntry{path: effectiveListenPath(mainCfg.Listen.DoHPath), router: mainRouter, mode: "standard", addr: mainCfg.Listen.DOHAddr()})
 	}
 	if mainCfg.ParallelReturn.Enabled && mainCfg.ParallelReturn.Listen.DOH != "" {
-		entries = append(entries, sharedDoHEntry{path: effectiveListenPath(mainCfg.ParallelReturn.Listen.DoHPath), router: parallelRouter, mode: "parallel", addr: mainCfg.ParallelReturn.Listen.DOH})
+		entries = append(entries, sharedDoHEntry{path: effectiveListenPath(mainCfg.ParallelReturn.Listen.DoHPath), router: parallelRouter, mode: "parallel", addr: mainCfg.ParallelReturn.Listen.DOHAddr()})
 	}
 
 	seen := make(map[string]struct{}, len(entries))

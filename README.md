@@ -234,6 +234,26 @@ parallel_return:
         ecs_ip: "8.8.8.8"
 ```
 
+## ACME 自动证书
+
+开启 `auto_cert` 后，程序会使用 Let's Encrypt ACME HTTP-01 challenge 自动申请并续期证书，并把证书缓存到 `cert_dir`。`cert_dir` 可以写相对路径；相对路径会按配置文件所在目录解析。
+
+```yaml
+auto_cert:
+  enabled: true
+  email: "admin@example.com"
+  domains:
+    - "dns.example.com"
+  cert_dir: "certs"
+```
+
+使用前需要满足：
+
+- 域名 A/AAAA 记录指向运行本程序的公网服务器。
+- 服务器公网 TCP 80 端口可被 Let's Encrypt 访问，程序会自动启动 `:80` 用于 ACME 验证。
+- DoH/DoT/DoQ 监听域名应包含在 `auto_cert.domains` 中，例如 `listen.dot_sni`、`listen.doq_sni` 使用的域名。
+- 如果启用自动证书，可以不配置 `tls_certificates`；关闭自动证书时会回退到本地证书配置。
+
 ## 并行返回关键配置
 
 - `warm_cache_ttl`
