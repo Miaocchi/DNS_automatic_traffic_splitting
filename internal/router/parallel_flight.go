@@ -61,6 +61,55 @@ func copyReplyFor(m, req *dns.Msg) *dns.Msg {
 	return out
 }
 
+func cacheableNegativeTTL(resp *dns.Msg) uint32 {
+	if resp == nil || len(resp.Answer) > 0 || (resp.Rcode != dns.RcodeNameError && resp.Rcode != dns.RcodeSuccess) {
+		return 0
+	}
+
+	var ttl uint32
+	for _, rr := range resp.Ns {
+		soa, ok := rr.(*dns.SOA)
+		if !ok {
+			continue
+		}
+		candidate := soa.Hdr.Ttl
+		if soa.Minttl < candidate {
+			candidate = soa.Minttl
+		}
+		if candidate > 0 && (ttl == 0 || candidate < ttl) {
+			ttl = candidate
+		}
+	}
+	return ttl
+}
+
+func capNegativeResponseTTL(resp *dns.Msg, ttl uint32) {
+	if resp == nil {
+		return
+	}
+	for _, rr := range resp.Answer {
+		if rr != nil && rr.Header().Ttl > ttl {
+			rr.Header().Ttl = ttl
+		}
+	}
+	for _, rr := range resp.Ns {
+		if rr != nil && rr.Header().Ttl > ttl {
+			rr.Header().Ttl = ttl
+		}
+	}
+}
+
+func copyNegativeCacheReply(resp, req *dns.Msg, expiresAt time.Time) *dns.Msg {
+	copy := copyReplyFor(resp, req)
+	remaining := time.Until(expiresAt)
+	var ttl uint32
+	if remaining > 0 {
+		ttl = uint32(remaining / time.Second)
+	}
+	capNegativeResponseTTL(copy, ttl)
+	return copy
+}
+
 func (r *Router) resolveByMode(ctx context.Context, req *dns.Msg, clients []client.DNSClient, group string) (*dns.Msg, error) {
 	if !r.parallelReturn {
 		return client.RaceResolve(ctx, req, clients)
@@ -80,6 +129,12 @@ func (r *Router) resolveByMode(ctx context.Context, req *dns.Msg, clients []clie
 	entry := r.aggregateCache[key]
 	f := r.aggregateWarmup[key]
 	if entry.resp != nil && now.Before(entry.expiresAt) {
+		if entry.negative {
+			resp := copyNegativeCacheReply(entry.resp, req, entry.expiresAt)
+			r.aggregateCacheMu.Unlock()
+			setRequestReturnMode(ctx, "aggregate-cache")
+			return resp, nil
+		}
 		entry.hitCount++
 		entry.expiresAt = now.Add(r.parallelAggregateCacheTTLForResponse(entry.resp))
 		refresh := f == nil && entry.hitCount >= hotAggregateRefreshThreshold && now.Sub(entry.lastHotRefresh) >= hotAggregateRefreshMinInterval
@@ -151,17 +206,28 @@ func (r *Router) collectFlight(ctx context.Context, key string, f *aggregateFlig
 		close(f.ready)
 		r.aggregateCacheMu.Unlock()
 	})
-	ok := err == nil && resp != nil && resp.Rcode == dns.RcodeSuccess && len(resp.Answer) > 0
+	positive := err == nil && resp != nil && resp.Rcode == dns.RcodeSuccess && len(resp.Answer) > 0
+	negativeTTL := cacheableNegativeTTL(resp)
+	cacheNegative := !positive && negativeTTL > 0
+	cacheResp := resp
+	if cacheNegative {
+		cacheResp = resp.Copy()
+		capNegativeResponseTTL(cacheResp, negativeTTL)
+	}
 	r.aggregateCacheMu.Lock()
 	// The last waiter may have canceled and a replacement round already started.
 	if r.aggregateWarmup[key] == f {
-		if ok {
-			r.aggregateCache[key] = aggregateCacheEntry{resp: resp, expiresAt: time.Now().Add(r.parallelAggregateCacheTTLForResponse(resp)), lastHotRefresh: r.aggregateCache[key].lastHotRefresh}
+		if positive || cacheNegative {
+			expiresAt := time.Now().Add(r.parallelAggregateCacheTTLForResponse(resp))
+			if cacheNegative {
+				expiresAt = time.Now().Add(time.Duration(negativeTTL) * time.Second)
+			}
+			r.aggregateCache[key] = aggregateCacheEntry{resp: cacheResp, expiresAt: expiresAt, lastHotRefresh: r.aggregateCache[key].lastHotRefresh, negative: cacheNegative}
 		}
 		delete(r.aggregateWarmup, key)
 	}
 	r.aggregateCacheMu.Unlock()
 	if r.logger != nil {
-		r.logger.RecordAggregateWarmup(ok)
+		r.logger.RecordAggregateWarmup(positive)
 	}
 }

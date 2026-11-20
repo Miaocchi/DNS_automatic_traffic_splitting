@@ -46,6 +46,7 @@ type aggregateCacheEntry struct {
 	expiresAt      time.Time
 	hitCount       int
 	lastHotRefresh time.Time
+	negative       bool
 }
 
 const hotAggregateRefreshThreshold = 3
