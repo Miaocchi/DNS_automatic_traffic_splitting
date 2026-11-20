@@ -41,7 +41,7 @@ func newAResp(name, ip string, ttl uint32) *dns.Msg {
 }
 
 func TestParallelReturnFirstResponseUsesRaceAndCapsTTL(t *testing.T) {
-	r := &Router{parallelReturn: true, config: &config.Config{ParallelReturn: config.ParallelReturnConfig{WarmCacheTTL: 5, AggregateCacheTTL: 30}}, aggregateCache: make(map[string]aggregateCacheEntry), aggregateWarmup: make(map[string]struct{})}
+	r := NewRouterWithMode(&config.Config{ParallelReturn: config.ParallelReturnConfig{WarmCacheTTL: 5, AggregateCacheTTL: 30}}, nil, nil, true)
 	req := new(dns.Msg)
 	req.SetQuestion("example.com.", dns.TypeA)
 
@@ -63,7 +63,7 @@ func TestParallelReturnFirstResponseUsesRaceAndCapsTTL(t *testing.T) {
 }
 
 func TestParallelReturnSecondResponseUsesWarmAggregateCache(t *testing.T) {
-	r := &Router{parallelReturn: true, config: &config.Config{ParallelReturn: config.ParallelReturnConfig{WarmCacheTTL: 5, AggregateCacheTTL: 30}}, aggregateCache: make(map[string]aggregateCacheEntry), aggregateWarmup: make(map[string]struct{})}
+	r := NewRouterWithMode(&config.Config{ParallelReturn: config.ParallelReturnConfig{WarmCacheTTL: 5, AggregateCacheTTL: 30}}, nil, nil, true)
 	req := new(dns.Msg)
 	req.SetQuestion("example.com.", dns.TypeA)
 
@@ -92,7 +92,7 @@ func TestParallelReturnSecondResponseUsesWarmAggregateCache(t *testing.T) {
 }
 
 func TestAggregateCacheHitExtendsExpiry(t *testing.T) {
-	r := &Router{parallelReturn: true, config: &config.Config{ParallelReturn: config.ParallelReturnConfig{WarmCacheTTL: 5, AggregateCacheTTL: 2}}, aggregateCache: make(map[string]aggregateCacheEntry), aggregateWarmup: make(map[string]struct{})}
+	r := NewRouterWithMode(&config.Config{ParallelReturn: config.ParallelReturnConfig{WarmCacheTTL: 5, AggregateCacheTTL: 2}}, nil, nil, true)
 	req := new(dns.Msg)
 	req.SetQuestion("example.com.", dns.TypeA)
 	key := buildAggregateCacheKey(req, "cn")
@@ -103,7 +103,7 @@ func TestAggregateCacheHitExtendsExpiry(t *testing.T) {
 	}
 
 	before := r.aggregateCache[key].expiresAt
-	r.touchAggregateCache(key, req.Copy(), nil)
+	_, _ = r.resolveByMode(context.Background(), req, nil, "cn")
 	after := r.aggregateCache[key].expiresAt
 
 	if !after.After(before) {
@@ -112,7 +112,7 @@ func TestAggregateCacheHitExtendsExpiry(t *testing.T) {
 }
 
 func TestHotRefreshRespectsMinimumInterval(t *testing.T) {
-	r := &Router{parallelReturn: true, config: &config.Config{ParallelReturn: config.ParallelReturnConfig{WarmCacheTTL: 5, AggregateCacheTTL: 30}}, aggregateCache: make(map[string]aggregateCacheEntry), aggregateWarmup: make(map[string]struct{})}
+	r := NewRouterWithMode(&config.Config{ParallelReturn: config.ParallelReturnConfig{WarmCacheTTL: 5, AggregateCacheTTL: 30}}, nil, nil, true)
 	req := new(dns.Msg)
 	req.SetQuestion("example.com.", dns.TypeA)
 	key := buildAggregateCacheKey(req, "cn")
@@ -124,7 +124,7 @@ func TestHotRefreshRespectsMinimumInterval(t *testing.T) {
 		lastHotRefresh: time.Now(),
 	}
 
-	r.touchAggregateCache(key, req.Copy(), nil)
+	_, _ = r.resolveByMode(context.Background(), req, nil, "cn")
 
 	if _, ok := r.aggregateWarmup[key]; ok {
 		t.Fatal("expected hot refresh to be throttled by minimum interval")

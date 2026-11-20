@@ -38,7 +38,7 @@ type Router struct {
 
 	aggregateCacheMu sync.RWMutex
 	aggregateCache   map[string]aggregateCacheEntry
-	aggregateWarmup  map[string]struct{}
+	aggregateWarmup  map[string]*aggregateFlight
 }
 
 type aggregateCacheEntry struct {
@@ -62,7 +62,7 @@ func NewRouterWithMode(cfg *config.Config, geoManager *GeoDataManager, logger *q
 		logger:          logger,
 		parallelReturn:  parallelReturn,
 		aggregateCache:  make(map[string]aggregateCacheEntry),
-		aggregateWarmup: make(map[string]struct{}),
+		aggregateWarmup: make(map[string]*aggregateFlight),
 	}
 
 	for domain, target := range cfg.Rules {
@@ -465,18 +465,21 @@ func (r *Router) routeInternal(ctx context.Context, req *dns.Msg) (*dns.Msg, str
 		resp   *dns.Msg
 		err    error
 		source string
+		mode   string
 	}
 
 	dualCh := make(chan dualResult, 2)
 
-	go func() {
-		resp, err := r.resolveByMode(ctx, req.Copy(), r.overseasClients, "overseas")
-		dualCh <- dualResult{resp: resp, err: err, source: "overseas"}
-	}()
-	go func() {
-		resp, err := r.resolveByMode(ctx, req.Copy(), r.cnClients, "cn")
-		dualCh <- dualResult{resp: resp, err: err, source: "cn"}
-	}()
+	queryGroup := func(group string, clients []client.DNSClient) {
+		branch := ctx
+		if r.parallelReturn {
+			branch = WithRequestMeta(ctx, RequestMetaFromContext(ctx))
+		}
+		resp, err := r.resolveByMode(branch, req.Copy(), clients, group)
+		dualCh <- dualResult{resp: resp, err: err, source: group, mode: RequestMetaFromContext(branch).ReturnMode}
+	}
+	go queryGroup("overseas", r.overseasClients)
+	go queryGroup("cn", r.cnClients)
 
 	var overseasResult, cnResult *dualResult
 	for i := 0; i < 2; i++ {
@@ -499,6 +502,12 @@ func (r *Router) routeInternal(ctx context.Context, req *dns.Msg) (*dns.Msg, str
 	if overseasResult == nil || cnResult == nil {
 		return nil, "GeoIP(Error)", fmt.Errorf("并发查询未返回完整结果")
 	}
+	reply := func(winner *dualResult, source string) (*dns.Msg, string, error) {
+		if r.parallelReturn {
+			setRequestReturnMode(ctx, winner.mode)
+		}
+		return winner.resp, source, nil
+	}
 
 	// 海外成功且有应答
 	if overseasResult.err == nil && overseasResult.resp != nil && overseasResult.resp.Rcode == dns.RcodeSuccess {
@@ -517,27 +526,27 @@ func (r *Router) routeInternal(ctx context.Context, req *dns.Msg) (*dns.Msg, str
 		// 如果解析出的 IP 是国内的，用国内 DNS 的结果（更准确）
 		if resolvedIP != nil && r.geo.IsCNIP(resolvedIP) {
 			if cnResult.err == nil && cnResult.resp != nil && cnResult.resp.Rcode == dns.RcodeSuccess {
-				return cnResult.resp, "GeoIP(CN)", nil
+				return reply(cnResult, "GeoIP(CN)")
 			}
 			// 国内 DNS 失败，仍然返回海外结果
-			return overseasResult.resp, "GeoIP(CN/Fallback-Overseas)", nil
+			return reply(overseasResult, "GeoIP(CN/Fallback-Overseas)")
 		}
 
-		return overseasResult.resp, "GeoIP(Overseas)", nil
+		return reply(overseasResult, "GeoIP(Overseas)")
 	}
 
 	// 海外失败或 NXDOMAIN/SERVFAIL，尝试用国内结果
 	if cnResult.err == nil && cnResult.resp != nil && cnResult.resp.Rcode == dns.RcodeSuccess {
 		log.Printf("海外DNS解析失败或无结果，使用国内DNS结果: %s", qName)
-		return cnResult.resp, "GeoIP(Fallback/CN)", nil
+		return reply(cnResult, "GeoIP(Fallback/CN)")
 	}
 
 	// 两边都失败，返回最有意义的错误
 	if overseasResult.err == nil && overseasResult.resp != nil {
-		return overseasResult.resp, "GeoIP(Overseas)", nil
+		return reply(overseasResult, "GeoIP(Overseas)")
 	}
 	if cnResult.err == nil && cnResult.resp != nil {
-		return cnResult.resp, "GeoIP(CN)", nil
+		return reply(cnResult, "GeoIP(CN)")
 	}
 
 	// 全部出错
@@ -550,127 +559,6 @@ func (r *Router) routeInternal(ctx context.Context, req *dns.Msg) (*dns.Msg, str
 	// 两侧都是 (nil resp, nil err)：不能返回 (nil, nil)，
 	// 否则调用方按"成功"处理并解引用空指针。
 	return nil, "GeoIP(Error)", fmt.Errorf("并发查询未返回任何响应")
-}
-
-func (r *Router) resolveByMode(ctx context.Context, req *dns.Msg, clients []client.DNSClient, group string) (*dns.Msg, error) {
-	if !r.parallelReturn {
-		return client.RaceResolve(ctx, req, clients)
-	}
-
-	cacheKey := buildAggregateCacheKey(req, group)
-	if cached := r.getAggregateCache(cacheKey); cached != nil {
-		setRequestReturnMode(ctx, "aggregate-cache")
-		r.touchAggregateCache(cacheKey, req.Copy(), clients)
-		return cached, nil
-	}
-
-	resp, err := client.RaceResolve(ctx, req, clients)
-	if err == nil && resp != nil {
-		capResponseTTL(resp, uint32(r.parallelWarmCacheTTLSeconds()))
-		if r.parallelSingleRecordPerType() {
-			client.TrimToSingleRecordPerType(resp)
-		}
-	}
-	setRequestReturnMode(ctx, "race-first")
-	r.scheduleAggregateWarmup(cacheKey, req.Copy(), clients)
-	return resp, err
-}
-
-func buildAggregateCacheKey(req *dns.Msg, group string) string {
-	if req == nil || len(req.Question) == 0 {
-		return group
-	}
-	q := req.Question[0]
-	ecs := client.ExtractECS(req)
-	return fmt.Sprintf("%s|%s|%d|%d|%s", group, strings.ToLower(q.Name), q.Qtype, q.Qclass, ecs)
-}
-
-func (r *Router) getAggregateCache(key string) *dns.Msg {
-	r.aggregateCacheMu.RLock()
-	entry, ok := r.aggregateCache[key]
-	r.aggregateCacheMu.RUnlock()
-	if !ok {
-		return nil
-	}
-	if time.Now().After(entry.expiresAt) {
-		r.aggregateCacheMu.Lock()
-		delete(r.aggregateCache, key)
-		r.aggregateCacheMu.Unlock()
-		return nil
-	}
-	if entry.resp == nil {
-		return nil
-	}
-	return entry.resp.Copy()
-}
-
-func (r *Router) touchAggregateCache(key string, req *dns.Msg, clients []client.DNSClient) {
-	r.aggregateCacheMu.Lock()
-	entry, ok := r.aggregateCache[key]
-	if !ok || entry.resp == nil {
-		r.aggregateCacheMu.Unlock()
-		return
-	}
-	cacheTTL := r.parallelAggregateCacheTTLForResponse(entry.resp)
-	entry.hitCount++
-	entry.expiresAt = time.Now().Add(cacheTTL)
-	canRefresh := entry.hitCount >= hotAggregateRefreshThreshold && time.Since(entry.lastHotRefresh) >= hotAggregateRefreshMinInterval
-	if canRefresh {
-		entry.lastHotRefresh = time.Now()
-	}
-	r.aggregateCache[key] = entry
-	r.aggregateCacheMu.Unlock()
-
-	if canRefresh {
-		if r.logger != nil {
-			r.logger.RecordHotRefreshTrigger()
-		}
-		r.scheduleAggregateWarmup(key, req, clients)
-	}
-}
-
-func (r *Router) scheduleAggregateWarmup(key string, req *dns.Msg, clients []client.DNSClient) {
-	r.aggregateCacheMu.Lock()
-	if _, ok := r.aggregateWarmup[key]; ok {
-		r.aggregateCacheMu.Unlock()
-		return
-	}
-	r.aggregateWarmup[key] = struct{}{}
-	r.aggregateCacheMu.Unlock()
-
-	go func() {
-		defer func() {
-			r.aggregateCacheMu.Lock()
-			delete(r.aggregateWarmup, key)
-			r.aggregateCacheMu.Unlock()
-		}()
-
-		cacheTTL := r.parallelAggregateCacheTTLForResponse(nil)
-		warmCtx, cancel := context.WithTimeout(context.Background(), cacheTTL)
-		defer cancel()
-
-		resp, err := client.AggregateResolve(warmCtx, req, clients, r.parallelAggregateTTLStrategy())
-		if err != nil || resp == nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) == 0 {
-			if r.logger != nil {
-				r.logger.RecordAggregateWarmup(false)
-			}
-			return
-		}
-
-		cacheTTL = r.parallelAggregateCacheTTLForResponse(resp)
-
-		r.aggregateCacheMu.Lock()
-		r.aggregateCache[key] = aggregateCacheEntry{
-			resp:           resp.Copy(),
-			expiresAt:      time.Now().Add(cacheTTL),
-			hitCount:       0,
-			lastHotRefresh: time.Time{},
-		}
-		r.aggregateCacheMu.Unlock()
-		if r.logger != nil {
-			r.logger.RecordAggregateWarmup(true)
-		}
-	}()
 }
 
 func (r *Router) parallelWarmCacheTTL() time.Duration {

@@ -25,7 +25,7 @@ func TestAggregateResolveMergesUniqueAnswers(t *testing.T) {
 		&fakeRaceClient{resp: newSuccessMsg("example.com.", dns.TypeA, &dns.A{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("8.8.8.8").To4()})},
 	}
 
-	resp, err := AggregateResolve(context.Background(), req, clients, "median")
+	resp, err := AggregateResolve(context.Background(), req, clients, "median", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestAggregateResolveDedupesDuplicateAnswers(t *testing.T) {
 		&fakeRaceClient{resp: newSuccessMsg("example.com.", dns.TypeA, rr)},
 	}
 
-	resp, err := AggregateResolve(context.Background(), req, clients, "median")
+	resp, err := AggregateResolve(context.Background(), req, clients, "median", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestAggregateResolveStripsUpstreamOPTAndECS(t *testing.T) {
 		&fakeRaceClient{resp: &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeSuccess}, Question: req.Question, Answer: []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("1.1.1.1").To4()}}, Extra: []dns.RR{upstreamOPT}}},
 	}
 
-	resp, err := AggregateResolve(context.Background(), req, clients, "median")
+	resp, err := AggregateResolve(context.Background(), req, clients, "median", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestAggregateResolveDedupesSameRecordWithDifferentTTLUsingMedianTTL(t *test
 		&fakeRaceClient{resp: newSuccessMsg("example.com.", dns.TypeA, &dns.A{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30}, A: net.ParseIP("1.1.1.1").To4()})},
 	}
 
-	resp, err := AggregateResolve(context.Background(), req, clients, "median")
+	resp, err := AggregateResolve(context.Background(), req, clients, "median", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

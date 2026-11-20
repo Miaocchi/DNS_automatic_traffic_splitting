@@ -17,7 +17,20 @@ type aggregateResult struct {
 	idx  int
 }
 
-func AggregateResolve(ctx context.Context, req *dns.Msg, clients []DNSClient, ttlStrategy string) (*dns.Msg, error) {
+// AggregateResolve optionally delivers an independent first response while collecting
+// the same round for the aggregate. Without a NOERROR, first gets the final fallback.
+func AggregateResolve(ctx context.Context, req *dns.Msg, clients []DNSClient, ttlStrategy string, first func(*dns.Msg, error)) (resp *dns.Msg, err error) {
+	if first != nil {
+		defer func() {
+			if first != nil {
+				if resp != nil {
+					first(resp.Copy(), err)
+				} else {
+					first(nil, err)
+				}
+			}
+		}()
+	}
 	if len(clients) == 0 {
 		return nil, fmt.Errorf("没有可用的上游客户端")
 	}
@@ -52,6 +65,10 @@ func AggregateResolve(ctx context.Context, req *dns.Msg, clients []DNSClient, tt
 				continue
 			}
 			if r.resp.Rcode == dns.RcodeSuccess {
+				if first != nil {
+					first(r.resp.Copy(), nil)
+					first = nil
+				}
 				responses = append(responses, r)
 				continue
 			}
