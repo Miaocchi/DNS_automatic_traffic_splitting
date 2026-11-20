@@ -31,7 +31,10 @@ func NewDoTServerWithMode(cfg *config.Config, r *router.Router, cm *util.CertMan
 		log.Println("DoT: Using AutoCert for TLS")
 		tlsConfig = &tls.Config{
 			GetCertificate: cm.GetCertificateFunc(),
-			NextProtos:     []string{"dns", "h2", "http/1.1"},
+			// RFC 7858 §3.1 规定 DoT 的 ALPN 标识为 "dot"。
+			// 旧值 {"dns","h2","http/1.1"} 既不含合法标识，
+			// 又会让发送 ALPN "dot" 的合规客户端直接握手失败。
+			NextProtos: []string{"dot"},
 		}
 	} else {
 		var certs []tls.Certificate
@@ -53,7 +56,7 @@ func NewDoTServerWithMode(cfg *config.Config, r *router.Router, cm *util.CertMan
 
 		tlsConfig = &tls.Config{
 			Certificates: certs,
-			NextProtos:   []string{"dns", "h2", "http/1.1"},
+			NextProtos:   []string{"dot"},
 		}
 	}
 
